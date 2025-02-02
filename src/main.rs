@@ -8,7 +8,7 @@ mod tests;
 
 fn main() -> Result<(), ()> {
     let source = "
-let x = 1;
+1 == \"1\";
 ";
 
     let program = parser::program_parser().parse(source).map_err(|err| {
@@ -23,7 +23,7 @@ let x = 1;
         eprintln!("ERROR: {:#?}", err);
     })?;
 
-    println!("STACK VALUE: {:#?}", Heap::latest().value());
+    println!("STACK VALUE: {:#?}", rsx.latest_heap_ref.value());
 
     Ok(())
 }

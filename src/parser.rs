@@ -2,15 +2,28 @@ use chumsky::{combinator::Repeated, prelude::*};
 
 #[derive(Debug, Clone)]
 pub enum BinaryOperator {
-    ADD,
-    SUB,
-    DIV,
-    MULTIPLY,
+    Add,
+    Sub,
+    Div,
+    Multiply,
+    Equal,
+    StrictEqual,
+    NotEqual,
+    NotStrictEqual,
+    And,
+    Or,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
 }
 
 #[derive(Debug, Clone)]
 pub enum UnaryOperator {
-    NEGATIVE,
+    Minus,
+    Plus,
+    Typeof,
+    Not,
 }
 
 #[derive(Debug, Clone)]
@@ -69,12 +82,24 @@ const DOT: char = '.';
 const COMMA: char = ',';
 const COLON: char = ':';
 const DOUBLE_QUOTE: char = '"';
-const MINUS: char = '-';
-const PLUS: char = '+';
-const MULTIPLY: char = '*';
-const DIVIDE: char = '/';
-const EQUALS: char = '=';
+const ASSIGN: char = '=';
 
+const NOT: &str = "!";
+const TYPEOF: &str = "typeof";
+const MINUS: &str = "-";
+const PLUS: &str = "+";
+const MULTIPLY: &str = "*";
+const DIVIDE: &str = "/";
+const EQUAL: &str = "==";
+const STRICT_EQUAL: &str = "===";
+const NOT_EQUAL: &str = "!=";
+const NOT_STRICT_EQUAL: &str = "!==";
+const AND: &str = "&&";
+const OR: &str = "||";
+const LESS_THAN: &str = "<";
+const LESS_THAN_OR_EQUAL: &str = "<=";
+const GREATER_THAN: &str = ">";
+const GREATER_THAN_OR_EQUAL: &str = ">=";
 const ARROW: &str = "=>";
 const COMMENT_SINGLE_LINE: &str = "//";
 const COMMENT_MULTI_LINE_START: &str = "/*";
@@ -266,18 +291,22 @@ pub fn expr_parser<'a>(
     recursive(|expr_parser| {
         let op = |c| just(c).padded();
 
-        let unary_negative = op(MINUS)
+        let unary = op(MINUS)
+            .to(unary(UnaryOperator::Minus))
+            .or(op(PLUS).to(unary(UnaryOperator::Plus)))
+            .or(op(TYPEOF).to(unary(UnaryOperator::Typeof)))
+            .or(op(NOT).to(unary(UnaryOperator::Not)))
             .repeated()
             .then(atom_parser(expr_parser, stmt_parser))
-            .foldr(|_op, rhs| unary(UnaryOperator::NEGATIVE)(Box::new(rhs)));
+            .foldr(|op, rhs| op(Box::new(rhs)));
 
-        let product = unary_negative
+        let product = unary
             .clone()
             .then(
                 op(MULTIPLY)
-                    .to(binary(BinaryOperator::MULTIPLY))
-                    .or(op(DIVIDE).to(binary(BinaryOperator::DIV)))
-                    .then(unary_negative)
+                    .to(binary(BinaryOperator::Multiply))
+                    .or(op(DIVIDE).to(binary(BinaryOperator::Div)))
+                    .then(unary)
                     .repeated(),
             )
             .foldl(|lhs, (op, rhs)| op(Box::new(lhs), Box::new(rhs)));
@@ -286,14 +315,42 @@ pub fn expr_parser<'a>(
             .clone()
             .then(
                 op(PLUS)
-                    .to(binary(BinaryOperator::ADD))
-                    .or(op(MINUS).to(binary(BinaryOperator::SUB)))
+                    .to(binary(BinaryOperator::Add))
+                    .or(op(MINUS).to(binary(BinaryOperator::Sub)))
+                    .or(op(STRICT_EQUAL).to(binary(BinaryOperator::StrictEqual)))
+                    .or(op(NOT_EQUAL).to(binary(BinaryOperator::NotEqual)))
+                    .or(op(NOT_STRICT_EQUAL).to(binary(BinaryOperator::NotStrictEqual)))
+                    .or(op(AND).to(binary(BinaryOperator::And)))
+                    .or(op(OR).to(binary(BinaryOperator::Or)))
+                    .or(op(LESS_THAN).to(binary(BinaryOperator::LessThan)))
+                    .or(op(LESS_THAN_OR_EQUAL).to(binary(BinaryOperator::LessThanOrEqual)))
+                    .or(op(GREATER_THAN).to(binary(BinaryOperator::GreaterThan)))
+                    .or(op(GREATER_THAN_OR_EQUAL).to(binary(BinaryOperator::GreaterThanOrEqual)))
                     .then(product)
                     .repeated(),
             )
             .foldl(|lhs, (op, rhs)| op(Box::new(lhs), Box::new(rhs)));
 
-        sum
+        let condition = sum
+            .clone()
+            .then(
+                op(EQUAL)
+                    .to(binary(BinaryOperator::Equal))
+                    .or(op(STRICT_EQUAL).to(binary(BinaryOperator::StrictEqual)))
+                    .or(op(NOT_EQUAL).to(binary(BinaryOperator::NotEqual)))
+                    .or(op(NOT_STRICT_EQUAL).to(binary(BinaryOperator::NotStrictEqual)))
+                    .or(op(AND).to(binary(BinaryOperator::And)))
+                    .or(op(OR).to(binary(BinaryOperator::Or)))
+                    .or(op(LESS_THAN).to(binary(BinaryOperator::LessThan)))
+                    .or(op(LESS_THAN_OR_EQUAL).to(binary(BinaryOperator::LessThanOrEqual)))
+                    .or(op(GREATER_THAN).to(binary(BinaryOperator::GreaterThan)))
+                    .or(op(GREATER_THAN_OR_EQUAL).to(binary(BinaryOperator::GreaterThanOrEqual)))
+                    .then(sum)
+                    .repeated(),
+            )
+            .foldl(|lhs, (op, rhs)| op(Box::new(lhs), Box::new(rhs)));
+
+        condition
     })
 }
 
@@ -357,14 +414,14 @@ fn stmt_parser() -> impl Parser<char, Statement, Error = Simple<char>> {
         let let_stmt = text::keyword(LET)
             .padded()
             .ignore_then(text::ident().padded())
-            .then_ignore(just(EQUALS).padded())
+            .then_ignore(just(ASSIGN).padded())
             .then(expr_parser(stmt_parser.clone()))
             .then_ignore(expr_end)
             .map(|(name, expr)| Statement::Let(name, Box::new(expr)));
 
         let assign_stmt = expr_parser(stmt_parser.clone())
             .padded()
-            .then_ignore(just(EQUALS).padded())
+            .then_ignore(just(ASSIGN).padded())
             .then(expr_parser(stmt_parser.clone()))
             .then_ignore(expr_end)
             .try_map(|(name, expr), span| match name {

@@ -1,4 +1,4 @@
-### Javascript Execution Engine in Rust
+### RSX - Rust Javascript Execution Engine
 
 Very simple JS Engine with basic expressions support:
 
