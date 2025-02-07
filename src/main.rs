@@ -17,13 +17,16 @@ fn main() -> Result<(), ()> {
 
     println!("PROGRAM: {:#?}", program);
 
-    let mut rsx = Rsx::new();
+    let rsx = &mut Rsx::new();
 
     rsx.execute_program(program).map_err(|err| {
         eprintln!("ERROR: {:#?}", err);
     })?;
 
-    println!("STACK VALUE: {:#?}", rsx.latest_heap_ref.value());
+    println!(
+        "STACK VALUE: {:#?}",
+        rsx.latest_value.clone().unwrap().value(rsx)
+    );
 
     Ok(())
 }

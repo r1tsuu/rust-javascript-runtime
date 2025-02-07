@@ -38,8 +38,6 @@ pub struct Heap {
     memory: HashMap<u64, *mut Value>,
 }
 
-unsafe impl Send for Heap {}
-
 impl Heap {
     pub fn new() -> Self {
         Heap {
@@ -48,55 +46,53 @@ impl Heap {
         }
     }
 
-    pub fn alloc(value: Value) -> HeapRef {
-        let mut heap = RSX_HEAP.lock().unwrap();
-
-        let address = heap.address;
-        heap.memory.insert(address, Box::into_raw(Box::new(value)));
-        heap.address += 1;
+    pub fn alloc(&mut self, value: Value) -> HeapRef {
+        let address = self.address;
+        self.memory.insert(address, Box::into_raw(Box::new(value)));
+        self.address += 1;
 
         return HeapRef::new(address);
     }
 
-    pub fn alloc_number(value: f64) -> HeapRef {
-        Heap::alloc(Value::Number(value))
+    pub fn alloc_number(&mut self, value: f64) -> HeapRef {
+        self.alloc(Value::Number(value))
     }
 
-    pub fn alloc_string(value: String) -> HeapRef {
-        Heap::alloc(Value::String(value))
+    pub fn alloc_string(&mut self, value: String) -> HeapRef {
+        self.alloc(Value::String(value))
     }
 
-    pub fn alloc_object() -> HeapRef {
-        Heap::alloc(Value::Object(Object::new()))
+    pub fn alloc_object(&mut self) -> HeapRef {
+        self.alloc(Value::Object(Object::new()))
     }
 
-    pub fn get_undefined() -> HeapRef {
+    pub fn get_undefined(&mut self) -> HeapRef {
         UNDEFINED_CELL
-            .get_or_init(|| Heap::alloc(Value::Undefined))
+            .get_or_init(|| self.alloc(Value::Undefined))
             .clone()
     }
 
-    pub fn get_null() -> HeapRef {
-        NULL_CELL.get_or_init(|| Heap::alloc(Value::Null)).clone()
+    pub fn get_null(&mut self) -> HeapRef {
+        NULL_CELL.get_or_init(|| self.alloc(Value::Null)).clone()
     }
 
-    pub fn get_false() -> HeapRef {
+    pub fn get_false(&mut self) -> HeapRef {
         FALSE_CELL
-            .get_or_init(|| Heap::alloc(Value::Boolean(false)))
+            .get_or_init(|| self.alloc(Value::Boolean(false)))
             .clone()
     }
 
-    pub fn get_true() -> HeapRef {
+    pub fn get_true(&mut self) -> HeapRef {
         TRUE_CELL
-            .get_or_init(|| Heap::alloc(Value::Boolean(true)))
+            .get_or_init(|| self.alloc(Value::Boolean(true)))
             .clone()
     }
 
-    pub fn get_boolean(value: bool) -> HeapRef {
+    pub fn get_boolean(&mut self, value: bool) -> HeapRef {
         if value {
-            Heap::get_true()
+            self.get_true()
         } else {
-            Heap::get_false()
+            self.get_false()
         }
     }
 }
@@ -105,7 +101,6 @@ static UNDEFINED_CELL: OnceLock<HeapRef> = OnceLock::new();
 static NULL_CELL: OnceLock<HeapRef> = OnceLock::new();
 static FALSE_CELL: OnceLock<HeapRef> = OnceLock::new();
 static TRUE_CELL: OnceLock<HeapRef> = OnceLock::new();
-static RSX_HEAP: LazyLock<Mutex<Heap>> = LazyLock::new(|| Mutex::new(Heap::new()));
 
 #[derive(Debug)]
 pub enum Value {
@@ -332,8 +327,8 @@ impl Value {
         self.equal_internal(other, true)
     }
 
-    pub fn alloc(self) -> HeapRef {
-        Heap::alloc(self)
+    pub fn alloc(self, heap: &mut Heap) -> HeapRef {
+        heap.alloc(self)
     }
 }
 
@@ -412,13 +407,9 @@ impl HeapRef {
         HeapRef { address }
     }
 
-    pub fn value<'a>(&self) -> &mut Value {
-        let x = *RSX_HEAP.lock().unwrap().memory.get(&self.address).unwrap();
-        unsafe { &mut *x }
-    }
-
-    pub fn value_raw<'a>(&self) -> *mut Value {
-        *RSX_HEAP.lock().unwrap().memory.get(&self.address).unwrap()
+    pub fn value<'a>(&self, rsx: &mut Rsx) -> &mut Value {
+        let x = rsx.heap.memory.get(&self.address).unwrap();
+        unsafe { &mut **x }
     }
 }
 
@@ -429,7 +420,8 @@ pub struct CallFrame {
 pub struct Rsx {
     contexts: Vec<Rc<RefCell<RsxExecutionContext>>>,
     call_stack: Vec<CallFrame>,
-    pub latest_heap_ref: HeapRef,
+    pub latest_value: Option<HeapRef>,
+    heap: Heap,
 }
 
 const GLOBAL_THIS: &str = "globalThis";
@@ -442,8 +434,9 @@ impl Rsx {
     pub fn new() -> Rsx {
         let mut rsx = Rsx {
             call_stack: vec![],
+            heap: Heap::new(),
+            latest_value: None,
             contexts: vec![],
-            latest_heap_ref: Heap::get_undefined(),
         };
 
         let global_context = Rc::new(RefCell::new(RsxExecutionContext {
@@ -454,14 +447,18 @@ impl Rsx {
         global_context
             .borrow_mut()
             .variables
-            .insert(GLOBAL_THIS.to_string(), Heap::alloc_object());
+            .insert(GLOBAL_THIS.to_string(), rsx.heap.alloc_object());
 
         rsx.contexts.push(global_context);
 
-        rsx.declare_global(GLOBAL_TRUE, Heap::get_true());
-        rsx.declare_global(GLOBAL_FALSE, Heap::get_true());
-        rsx.declare_global(GLOBAL_UNDEFINED, Heap::get_undefined());
-        rsx.declare_global(GLOBAL_NULL, Heap::get_null());
+        let true_ = rsx.heap.get_true();
+        rsx.declare_global(GLOBAL_TRUE, true_);
+        let false_ = rsx.heap.get_false();
+        rsx.declare_global(GLOBAL_FALSE, false_);
+        let undefined = rsx.heap.get_undefined();
+        rsx.declare_global(GLOBAL_UNDEFINED, undefined);
+        let null = rsx.heap.get_null();
+        rsx.declare_global(GLOBAL_NULL, null);
 
         rsx
     }
@@ -485,7 +482,7 @@ impl Rsx {
             .get(GLOBAL_THIS)
             // SAFE, created ^
             .unwrap()
-            .value()
+            .value(self)
             .try_object()
             // SAFE, created ^
             .unwrap()
@@ -495,13 +492,16 @@ impl Rsx {
 
     fn execute_expression(&mut self, expression: &Expression) -> Result<HeapRef, RsxError> {
         let result = match expression {
-            Expression::Num(value) => Heap::alloc_number(*value),
-            Expression::String(value) => Heap::alloc_string(value.clone()),
+            Expression::Num(value) => self.heap.alloc_number(*value),
+            Expression::String(value) => self.heap.alloc_string(value.clone()),
             Expression::Identifier(name) => self
                 .get_variable(name)
                 .ok_or(rsx_err!("{name} is not defined."))?,
             Expression::Unary(expression, operator) => {
-                let value = self.execute_expression(expression)?.value().try_number()?;
+                let value = self
+                    .execute_expression(expression)?
+                    .value(self)
+                    .try_number()?;
 
                 let result = match operator {
                     UnaryOperator::Minus => -value,
@@ -515,13 +515,13 @@ impl Rsx {
                     _ => unimplemented!(),
                 };
 
-                Heap::alloc_number(result)
+                self.heap.alloc_number(result)
             }
             Expression::Binary(left, operator, right) => {
                 let left = self.execute_expression(&left)?;
-                let left = left.value();
+                let left = left.value(self);
                 let right = self.execute_expression(&right)?;
-                let right = right.value();
+                let right = right.value(self);
 
                 let result = match operator {
                     BinaryOperator::Add => left.add(right),
@@ -533,7 +533,7 @@ impl Rsx {
                     _ => unimplemented!(),
                 };
 
-                Heap::alloc(result)
+                self.heap.alloc(result)
             }
             Expression::Call(function, args) => {
                 let args = {
@@ -546,7 +546,7 @@ impl Rsx {
                 };
 
                 let function = self.execute_expression(&function)?;
-                let callable = function.value().try_object()?.try_callable()?;
+                let callable = function.value(self).try_object()?.try_callable()?;
 
                 let return_value = match callable {
                     Callable::FromAST(arg_names, statement, captured_context) => {
@@ -572,13 +572,13 @@ impl Rsx {
                 if let Some(return_value) = return_value {
                     return_value
                 } else {
-                    Heap::get_undefined()
+                    self.heap.get_undefined()
                 }
             }
             _ => todo!(),
         };
 
-        self.latest_heap_ref = result.clone();
+        self.latest_value = Some(result.clone());
 
         Ok(result)
     }
@@ -595,10 +595,12 @@ impl Rsx {
                     ));
                 }
 
-                let function = Heap::alloc(Value::Object(Object::new_function_from_ast(
+                let curr_context = self.current_context().clone();
+
+                let function = self.heap.alloc(Value::Object(Object::new_function_from_ast(
                     args.clone(),
                     body.clone(),
-                    self.current_context().clone(),
+                    curr_context,
                 )));
 
                 self.current_context()
@@ -726,7 +728,7 @@ impl Rsx {
             .variables
             .get(GLOBAL_THIS)
             .unwrap()
-            .value()
+            .value(self)
             .try_object()
             .unwrap()
             .properties
