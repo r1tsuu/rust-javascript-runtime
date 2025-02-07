@@ -25,7 +25,7 @@ fn main() -> Result<(), ()> {
 
     println!(
         "STACK VALUE: {:#?}",
-        rsx.latest_value.clone().unwrap().value(rsx)
+        rsx.latest_value.clone().unwrap().populate(rsx)
     );
 
     Ok(())

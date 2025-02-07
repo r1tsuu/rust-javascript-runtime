@@ -1,11 +1,4 @@
-use std::{
-    backtrace::Backtrace,
-    cell::RefCell,
-    collections::HashMap,
-    ptr,
-    rc::Rc,
-    sync::{LazyLock, Mutex, OnceLock},
-};
+use std::{backtrace::Backtrace, collections::HashMap, ptr, sync::OnceLock};
 
 use crate::parser::{BinaryOperator, Expression, Program, Statement, UnaryOperator};
 
@@ -334,7 +327,7 @@ impl Value {
 
 #[derive(Debug)]
 enum Callable {
-    FromAST(Vec<String>, Statement, Rc<RefCell<RsxExecutionContext>>),
+    FromAST(Vec<String>, Statement, ExecutionScopeRef),
     Native,
 }
 
@@ -366,10 +359,10 @@ impl Object {
     fn new_function_from_ast(
         args: Vec<String>,
         statement: Box<Statement>,
-        captured_context: Rc<RefCell<RsxExecutionContext>>,
+        captured_scope: ExecutionScopeRef,
     ) -> Self {
         Self {
-            callable: Some(Callable::FromAST(args, *statement, captured_context)),
+            callable: Some(Callable::FromAST(args, *statement, captured_scope)),
             properties: HashMap::new(),
         }
     }
@@ -382,18 +375,49 @@ impl Object {
     }
 }
 
-#[derive(Debug)]
-struct RsxExecutionContext {
-    parent: Option<Rc<RefCell<RsxExecutionContext>>>,
-    variables: HashMap<String, HeapRef>,
+#[derive(Debug, Clone, Copy)]
+struct ExecutionScopeRef {
+    id: u64,
 }
 
-impl RsxExecutionContext {
-    fn new_root() -> Rc<RefCell<RsxExecutionContext>> {
-        Rc::new(RefCell::new(Self {
+impl ExecutionScopeRef {
+    fn populate<'a>(&self, rsx: &'a mut Rsx) -> &'a mut ExecutionScope {
+        rsx.scopes.get_mut(&self.id).unwrap()
+    }
+
+    fn new(id: u64) -> Self {
+        Self { id }
+    }
+}
+
+impl ExecutionScopeRef {}
+
+#[derive(Debug)]
+struct ExecutionScope {
+    parent: Option<ExecutionScopeRef>,
+    variables: HashMap<String, HeapRef>,
+    id: u64,
+}
+
+impl ExecutionScope {
+    fn new_root(id: u64) -> Self {
+        Self {
             parent: None,
             variables: HashMap::new(),
-        }))
+            id,
+        }
+    }
+
+    fn new(id: u64, parent: ExecutionScopeRef) -> Self {
+        Self {
+            parent: Some(parent),
+            variables: HashMap::new(),
+            id,
+        }
+    }
+
+    fn scope_ref(&self) -> ExecutionScopeRef {
+        ExecutionScopeRef::new(self.id)
     }
 }
 
@@ -407,7 +431,7 @@ impl HeapRef {
         HeapRef { address }
     }
 
-    pub fn value<'a>(&self, rsx: &mut Rsx) -> &mut Value {
+    pub fn populate<'a>(&self, rsx: &mut Rsx) -> &mut Value {
         let x = rsx.heap.memory.get(&self.address).unwrap();
         unsafe { &mut **x }
     }
@@ -418,10 +442,12 @@ pub struct CallFrame {
 }
 
 pub struct Rsx {
-    contexts: Vec<Rc<RefCell<RsxExecutionContext>>>,
+    scopes: HashMap<u64, ExecutionScope>,
     call_stack: Vec<CallFrame>,
     pub latest_value: Option<HeapRef>,
     heap: Heap,
+    last_scope_id: u64,
+    current_scope_ref: ExecutionScopeRef,
 }
 
 const GLOBAL_THIS: &str = "globalThis";
@@ -435,21 +461,20 @@ impl Rsx {
         let mut rsx = Rsx {
             call_stack: vec![],
             heap: Heap::new(),
+            last_scope_id: 0,
             latest_value: None,
-            contexts: vec![],
+            scopes: HashMap::new(),
+            current_scope_ref: ExecutionScopeRef::new(0),
         };
 
-        let global_context = Rc::new(RefCell::new(RsxExecutionContext {
-            parent: None,
-            variables: HashMap::new(),
-        }));
+        let global_scope_id = rsx.last_scope_id;
+        let mut global_scope = ExecutionScope::new_root(global_scope_id);
 
-        global_context
-            .borrow_mut()
+        global_scope
             .variables
             .insert(GLOBAL_THIS.to_string(), rsx.heap.alloc_object());
 
-        rsx.contexts.push(global_context);
+        rsx.scopes.insert(global_scope_id, global_scope);
 
         let true_ = rsx.heap.get_true();
         rsx.declare_global(GLOBAL_TRUE, true_);
@@ -463,6 +488,11 @@ impl Rsx {
         rsx
     }
 
+    pub fn next_scope_id(&mut self) -> u64 {
+        self.last_scope_id += 1;
+        self.last_scope_id
+    }
+
     pub fn execute_program(&mut self, program: Program) -> Result<(), RsxError> {
         for statement in &program.statements {
             self.execute_statement(&statement)?;
@@ -471,20 +501,14 @@ impl Rsx {
         Ok(())
     }
 
-    fn get_global_context(&mut self) -> Rc<RefCell<RsxExecutionContext>> {
-        self.contexts.get(0).unwrap().clone()
+    fn get_global_scope(&mut self) -> &mut ExecutionScope {
+        self.scopes.get_mut(&0).unwrap()
     }
 
     fn declare_global(&mut self, name: &str, heap_ref: HeapRef) {
-        self.get_global_context()
-            .borrow_mut()
-            .variables
-            .get(GLOBAL_THIS)
-            // SAFE, created ^
-            .unwrap()
-            .value(self)
+        self.get_global_this()
+            .populate(self)
             .try_object()
-            // SAFE, created ^
             .unwrap()
             .properties
             .insert(name.to_string(), ObjectProperty::new(heap_ref));
@@ -500,7 +524,7 @@ impl Rsx {
             Expression::Unary(expression, operator) => {
                 let value = self
                     .execute_expression(expression)?
-                    .value(self)
+                    .populate(self)
                     .try_number()?;
 
                 let result = match operator {
@@ -519,9 +543,9 @@ impl Rsx {
             }
             Expression::Binary(left, operator, right) => {
                 let left = self.execute_expression(&left)?;
-                let left = left.value(self);
+                let left = left.populate(self);
                 let right = self.execute_expression(&right)?;
-                let right = right.value(self);
+                let right = right.populate(self);
 
                 let result = match operator {
                     BinaryOperator::Add => left.add(right),
@@ -546,16 +570,15 @@ impl Rsx {
                 };
 
                 let function = self.execute_expression(&function)?;
-                let callable = function.value(self).try_object()?.try_callable()?;
+                let callable = function.populate(self).try_object()?.try_callable()?;
 
                 let return_value = match callable {
                     Callable::FromAST(arg_names, statement, captured_context) => {
-                        self.spawn_execution_context(captured_context.clone());
+                        self.spawn_scope(captured_context.clone());
 
                         for (arg_index, arg_name) in arg_names.iter().enumerate() {
                             if let Some(arg_value) = args.get(arg_index) {
-                                self.current_context()
-                                    .borrow_mut()
+                                self.current_scope()
                                     .variables
                                     .insert(arg_name.clone(), arg_value.clone());
                             }
@@ -563,7 +586,7 @@ impl Rsx {
 
                         self.call_stack.push(CallFrame { return_value: None });
                         self.execute_statement(statement)?;
-                        self.pop_execution_context();
+                        self.exit_current_scope();
                         self.call_stack.pop().unwrap().return_value
                     }
                     _ => unimplemented!(),
@@ -589,36 +612,34 @@ impl Rsx {
                 self.execute_expression(expression)?;
             }
             Statement::Function(name, args, body) => {
-                if self.current_context().borrow().variables.contains_key(name) {
+                if self.current_scope().variables.contains_key(name) {
                     return Err(rsx_err!(
                         "Variable {name} already exists in the current scope"
                     ));
                 }
 
-                let curr_context = self.current_context().clone();
+                let current_scope_ref = self.current_scope().scope_ref();
 
                 let function = self.heap.alloc(Value::Object(Object::new_function_from_ast(
                     args.clone(),
                     body.clone(),
-                    curr_context,
+                    current_scope_ref,
                 )));
 
-                self.current_context()
-                    .borrow_mut()
+                self.current_scope()
                     .variables
                     .insert(name.to_string(), function);
             }
             Statement::Let(name, expression) => {
                 let value = self.execute_expression(expression)?;
 
-                if self.current_context().borrow().variables.contains_key(name) {
+                if self.current_scope().variables.contains_key(name) {
                     return Err(rsx_err!(
                         "Variable {name} already exists in the current scope"
                     ));
                 }
 
-                self.current_context()
-                    .borrow_mut()
+                self.current_scope()
                     .variables
                     .insert(name.to_string(), value);
             }
@@ -633,7 +654,7 @@ impl Rsx {
                 }
             }
             Statement::Block(statements) => {
-                self.spawn_execution_context_from_current();
+                self.spawn_child_scope();
 
                 for statement in statements {
                     self.execute_statement(statement)?;
@@ -643,7 +664,7 @@ impl Rsx {
                     }
                 }
 
-                self.pop_execution_context();
+                self.exit_current_scope();
             }
             Statement::Assign(value, expr) => {
                 match value.as_ref() {
@@ -653,13 +674,13 @@ impl Rsx {
                         }
                         name => {
                             {
-                                let execution_context = self
-                                    .find_variable_execution_context(name)
+                                let scope = self
+                                    .find_variable_scope(name)
                                     .ok_or(rsx_err!("Variable {name} is not defined"))?;
 
                                 let value = self.execute_expression(expr)?;
-                                execution_context
-                                    .borrow_mut()
+                                scope
+                                    .populate(self)
                                     .variables
                                     .insert(name.to_string(), value);
                             };
@@ -676,45 +697,41 @@ impl Rsx {
         Ok(())
     }
 
-    fn spawn_execution_context(&mut self, execution_context: Rc<RefCell<RsxExecutionContext>>) {
-        let ctx = Rc::new(RefCell::new(RsxExecutionContext {
-            parent: Some(execution_context),
-            variables: HashMap::new(),
-        }));
-
-        self.contexts.push(ctx);
+    fn spawn_scope(&mut self, scope: ExecutionScopeRef) {
+        let scope = ExecutionScope::new(self.next_scope_id(), scope);
+        self.current_scope_ref = scope.scope_ref();
+        self.scopes.insert(scope.id, scope);
     }
 
-    fn spawn_execution_context_from_current(&mut self) {
-        let ctx = Rc::new(RefCell::new(RsxExecutionContext {
-            parent: Some(self.current_context()),
-            variables: HashMap::new(),
-        }));
-
-        self.contexts.push(ctx.clone());
+    fn spawn_child_scope(&mut self) {
+        let scope = ExecutionScope::new(self.next_scope_id(), self.current_scope().scope_ref());
+        self.current_scope_ref = scope.scope_ref();
+        self.scopes.insert(scope.id, scope);
     }
 
-    fn pop_execution_context(&mut self) {
-        self.contexts.pop();
+    fn exit_current_scope(&mut self) {
+        let parent = self.current_scope().parent.unwrap();
+        self.scopes.remove(&self.last_scope_id);
+        self.current_scope_ref = parent;
     }
 
-    fn current_context(&mut self) -> Rc<RefCell<RsxExecutionContext>> {
-        self.contexts.last_mut().unwrap().clone()
+    fn current_scope(&mut self) -> &mut ExecutionScope {
+        self.current_scope_ref.clone().populate(self)
     }
 
     fn get_variable(&mut self, name: &str) -> Option<HeapRef> {
         {
-            let mut curr_ctx = self.current_context();
+            let mut curr_ctx = self.current_scope();
 
             loop {
-                if let Some(var) = curr_ctx.borrow().variables.get(name) {
+                if let Some(var) = curr_ctx.variables.get(name) {
                     return Some(var.clone());
                 }
 
-                let parent_context = curr_ctx.borrow().parent.clone();
+                let parent_context = curr_ctx.parent.clone();
 
                 if let Some(parent_context) = parent_context {
-                    curr_ctx = parent_context.clone();
+                    curr_ctx = parent_context.clone().populate(self);
                 } else {
                     break;
                 }
@@ -722,13 +739,10 @@ impl Rsx {
         }
 
         // Try to get from globalThis
+
         if let Some(var) = self
-            .get_global_context()
-            .borrow()
-            .variables
-            .get(GLOBAL_THIS)
-            .unwrap()
-            .value(self)
+            .get_global_this()
+            .populate(self)
             .try_object()
             .unwrap()
             .properties
@@ -740,23 +754,28 @@ impl Rsx {
         }
     }
 
-    fn find_variable_execution_context(
-        &mut self,
-        name: &str,
-    ) -> Option<Rc<RefCell<RsxExecutionContext>>> {
+    fn get_global_this(&mut self) -> HeapRef {
+        self.get_global_scope()
+            .variables
+            .get(GLOBAL_THIS)
+            .unwrap()
+            .clone()
+    }
+
+    fn find_variable_scope(&mut self, name: &str) -> Option<ExecutionScopeRef> {
         {
-            let mut curr_ctx = self.current_context();
+            let mut scope = self.current_scope();
 
             loop {
-                if curr_ctx.borrow().variables.contains_key(name) {
+                if scope.variables.contains_key(name) {
                     println!("FOUND");
-                    return Some(curr_ctx.clone());
+                    return Some(scope.scope_ref().clone());
                 }
 
-                let parent_context = curr_ctx.borrow().parent.clone();
+                let parent_context = scope.parent.clone();
 
                 if let Some(parent_context) = parent_context {
-                    curr_ctx = parent_context.clone();
+                    scope = parent_context.populate(self);
                 } else {
                     break;
                 }

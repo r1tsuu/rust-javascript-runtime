@@ -35,63 +35,63 @@ fn core() {
 
     assert_eq!(
         run_test(rsx, "100+200*3+5+(3+5*3+6);")
-            .value(rsx)
+            .populate(rsx)
             .try_number()
             .unwrap(),
         729.0
     );
     assert_eq!(
         run_test(rsx, "100 == 100;")
-            .value(rsx)
+            .populate(rsx)
             .try_boolean()
             .unwrap(),
         true
     );
     assert_eq!(
         run_test(rsx, "100 == \"100\";")
-            .value(rsx)
+            .populate(rsx)
             .try_boolean()
             .unwrap(),
         true
     );
     assert_eq!(
         run_test(rsx, "100 === 100;")
-            .value(rsx)
+            .populate(rsx)
             .try_boolean()
             .unwrap(),
         true
     );
     assert_eq!(
         run_test(rsx, "100 === \"100\";")
-            .value(rsx)
+            .populate(rsx)
             .try_boolean()
             .unwrap(),
         false
     );
     assert_eq!(
         run_test(rsx, "let x = 1; let b = 6; x + b;")
-            .value(rsx)
+            .populate(rsx)
             .try_number()
             .unwrap(),
         7.0
     );
     assert_eq!(
         run_test(rsx, "let x = 1; let b = 6; x = 10 + b; x;")
-            .value(rsx)
+            .populate(rsx)
             .try_number()
             .unwrap(),
         16.0
     );
     assert_eq!(
         run_test(rsx, "\"Hello World\";")
-            .value(rsx)
+            .populate(rsx)
             .try_string()
             .unwrap(),
         "Hello World"
     );
     assert_eq!(
         run_test(rsx, "function x(a, b) { return a + b; } x(2, 3);")
-            .value(rsx)
+            .populate(rsx)
             .try_number()
             .unwrap(),
         5.0
@@ -99,7 +99,7 @@ fn core() {
     // ASSERT EQUAL FOR FUNCTIONS BY REF
     assert_eq!(
         run_test(rsx, "function x(a, b) { return a + b; } x == x;")
-            .value(rsx)
+            .populate(rsx)
             .try_boolean()
             .unwrap(),
         true
@@ -110,7 +110,7 @@ fn core() {
             rsx,
             "function x(a, b) { return a + b; } function y(a, b) { return a + b; } x==y;"
         )
-        .value(rsx)
+        .populate(rsx)
         .try_boolean()
         .unwrap(),
         false
